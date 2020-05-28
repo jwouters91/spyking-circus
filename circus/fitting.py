@@ -277,6 +277,17 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         min_scalar_product = numpy.min(amp_limits[:, 0] * norm_templates_2[:n_tm])
         max_scalar_product = numpy.max(amp_limits[:, 1] * norm_templates_2[:n_tm])
 
+    if display_profiling:
+        t_loading = 0
+        t_whitening = 0
+        t_peaking = 0
+        t_extracting = 0
+        t_scalar = 0
+        t_looping = 0
+        t_indices = 0
+        t_sparse_product = 0
+        t_argmax = 0
+
     for gcount, gidx in enumerate(to_explore):
         # print "Node", comm.rank, "is analyzing chunk", gidx, "/", nb_chunks, " ..."
         # # We need to deal with the borders by taking chunks of size [0, chunck_size + template_shift].
@@ -315,8 +326,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         local_chunk, t_offset = data_file.get_data(gidx, chunk_size, padding, nodes=nodes)           
         len_chunk = len(local_chunk)
         if display_profiling:
-            t_loading = time.time() - t1
-            print("Time loading", t_loading)
+            t_loading += time.time() - t1
+            
 
         t2 = time.time()
         if do_spatial_whitening:
@@ -329,8 +340,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             local_chunk = scipy.ndimage.filters.convolve1d(local_chunk, temporal_whitening, axis=0, mode='constant')
 
         if display_profiling:
-            t_whitening = time.time() - t2
-            print("Time whitening", t_whitening)
+            t_whitening += time.time() - t2
 
         # Extracting peaks.
 
@@ -409,8 +419,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         nb_local_peak_times = len(local_peaktimes)
 
         if display_profiling:
-            t_peaking = time.time() - t3
-            print("Time peak detection", t_peaking)
+            t_peaking += time.time() - t3
 
         if full_gpu:
             # all_indices = cmt.CUDAMatrix(all_indices)
@@ -430,8 +439,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             sub_mat = sub_mat.transpose(2, 1, 0).reshape(size_window, nb_local_peak_times)
 
             if display_profiling:
-                t_extracting = time.time() - t4
-                print("Time extracting snippets", t_extracting)
+                t_extracting += time.time() - t4
 
             t5 = time.time()
             del local_chunk
@@ -445,8 +453,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             del sub_mat
 
             if display_profiling:
-                t_scalar = time.time() - t5
-                print("Time scalar product", t_scalar)
+                t_scalar += time.time() - t5
+
             local_restriction = (t_offset, t_offset + chunk_size)
             all_spikes = local_peaktimes + g_offset
 
@@ -496,6 +504,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 else:
                     b_array = None
 
+                t9 = time.time()
                 if numerous_argmax:
                     if len(best_indices) == 0:
                         best_indices = largest_indices(flatten_data, nb_argmax)
@@ -504,6 +513,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 else:
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
                     best_template_index, peak_index = numpy.unravel_index(data.argmax(), data.shape)
+
+                if display_profiling:
+                    t_argmax += time.time() - t9
 
                 peak_scalar_product = data[best_template_index, peak_index]
                 best_template2_index = best_template_index + n_tm
@@ -550,6 +562,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 a_min, a_max = amp_limits[best_template_index, :]
 
                 if (a_min <= best_amp_n) & (best_amp_n <= a_max):
+
+                    t7 = time.time()
                     # Keep the matching.
                     peak_time_step = local_peaktimes[peak_index]
 
@@ -559,6 +573,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     nb_neighbors = len(is_neighbor)
                     indices = np.zeros((s_over, nb_neighbors), dtype=np.int32)
                     indices[idx_neighbor, np.arange(nb_neighbors)] = 1
+
+                    if display_profiling:
+                        t_indices += time.time() - t7
 
                     if full_gpu:
                         indices = cmt.CUDAMatrix(indices, copy_on_host=False)
@@ -571,10 +588,13 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         b_lines.add(tmp1.add(tmp2))
                         del tmp1, tmp2
                     else:
+                        t8 = time.time()
                         tmp1 = c_overs[best_template_index].multiply(-best_amp)
                         if numpy.abs(best_amp2_n) > min_second_component:
                             tmp1 += c_overs[best_template2_index].multiply(-best_amp2)
-                        b[:, is_neighbor] += tmp1.dot(indices)
+                        b[:, is_neighbor] += tmp1.toarray().dot(indices)
+                        if display_profiling:
+                            t_sparse_product += time.time() - t8
 
                     numerous_argmax = False
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
@@ -590,8 +610,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     b[best_template_index, peak_index] = -numpy.inf
 
                     # Even better, we should ban this template from beeing used in nearby peaks
-                    is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
-                    b[best_template_index, is_neighbor] = -numpy.inf                    
+                    #is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
+                    #b[best_template_index, is_neighbor] = -numpy.inf                    
 
                     # Save debug data.
                     if debug:
@@ -635,8 +655,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 iteration_nb += 1
 
             if display_profiling:
-                t_looping = time.time() - t6
-                print("Time looping", t_looping)
+                t_looping += time.time() - t6
 
             spikes_to_write = numpy.array(result['spiketimes'], dtype=numpy.uint32)
             amplitudes_to_write = numpy.array(result['amplitudes'], dtype=numpy.float32)
@@ -709,6 +728,14 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 del b, data
 
         sys.stderr.flush()
+
+    if display_profiling:
+        print("Time loading", t_loading)
+        print("Time whitening", t_whitening)
+        print("Time peak detection", t_peaking)
+        print("Time extracting snippets", t_extracting)
+        print("Time scalar product", t_scalar)
+        print("Time looping [argmax/indices/dot products]", t_looping, t_argmax, t_indices, t_sparse_product)
 
     sys.stderr.flush()
 
