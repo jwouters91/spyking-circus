@@ -484,6 +484,11 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             best_indices = numpy.zeros(0, dtype=numpy.int32)
 
             t6 = time.time()
+            loop_max = 0
+            loop_dot_products = 0
+            loop_build = 0
+            loop_validation = 0 
+            loop_rejection = 0
 
             data = b[:n_tm, :]
             flatten_data = data.ravel()
@@ -496,6 +501,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 else:
                     b_array = None
 
+                t7 = time.time()
+
                 if numerous_argmax:
                     if len(best_indices) == 0:
                         best_indices = largest_indices(flatten_data, nb_argmax)
@@ -504,6 +511,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 else:
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
                     best_template_index, peak_index = numpy.unravel_index(data.argmax(), data.shape)
+
+                loop_max += time.time() - t7
 
                 peak_scalar_product = data[best_template_index, peak_index]
                 best_template2_index = best_template_index + n_tm
@@ -551,6 +560,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
                 if (a_min <= best_amp_n) & (best_amp_n <= a_max):
                     # Keep the matching.
+
+
+                    t7 = time.time()
                     peak_time_step = local_peaktimes[peak_index]
 
                     peak_data = (local_peaktimes - peak_time_step).astype(np.int32)
@@ -560,6 +572,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     indices = np.zeros((s_over, nb_neighbors), dtype=np.int32)
                     indices[idx_neighbor, np.arange(nb_neighbors)] = 1
 
+                    loop_build += time.time() - t7
+
+                    t7 = time.time()
                     if full_gpu:
                         indices = cmt.CUDAMatrix(indices, copy_on_host=False)
                         if patch_gpu:
@@ -576,6 +591,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                             tmp1 += c_overs[best_template2_index].multiply(-best_amp2)
                         b[:, is_neighbor] += tmp1.dot(indices)
 
+                    loop_dot_products += time.time() - t7
+
                     numerous_argmax = False
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
 
@@ -586,12 +603,15 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         result['spiketimes'] += [t_spike]
                         result['amplitudes'] += [(best_amp_n, best_amp2_n)]
                         result['templates'] += [best_template_index]
+
+                    t7 = time.time()
                     # Mark current matching as tried.
                     b[best_template_index, peak_index] = -numpy.inf
 
                     # Even better, we should ban this template from beeing used in nearby peaks
                     is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
                     b[best_template_index, is_neighbor] = -numpy.inf                    
+                    loop_validation += time.time() - t7    
 
                     # Save debug data.
                     if debug:
@@ -605,6 +625,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         result_debug['template_nbs'] += [best_template_index]
                         result_debug['success_flags'] += [True]
                 else:
+
+                    t7 = time.time()
+
                     # Reject the matching.
                     numerous_argmax = True
 
@@ -619,6 +642,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         b[best_template_index, peak_index] = -numpy.inf
 
                     best_indices = best_indices[flatten_data[best_indices] > -numpy.inf]
+
+                    loop_rejection += time.time() - t7  
 
                     # Save debug data.
                     if debug:
@@ -637,6 +662,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             if display_profiling:
                 t_looping = time.time() - t6
                 print("Time looping", t_looping)
+                print('Max/Build/Dot/Valid/Rejection', loop_max, loop_build, loop_dot_products, loop_validation, loop_rejection)
 
             spikes_to_write = numpy.array(result['spiketimes'], dtype=numpy.uint32)
             amplitudes_to_write = numpy.array(result['amplitudes'], dtype=numpy.float32)
