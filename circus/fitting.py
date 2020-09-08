@@ -488,12 +488,20 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             iteration_nb = 0
             local_max = 0
             numerous_argmax = False
-            nb_argmax = n_tm
+
             best_indices = numpy.zeros(0, dtype=numpy.int32)
 
             t6 = time.time()
+            loop_max = 0
+            loop_dot_products = 0
+            loop_build = 0
+            loop_validation = 0 
+            loop_rejection = 0
+            nb_mean_argmax = []
+            nb_numerous_argmax = [0, 0]
 
             data = b[:n_tm, :]
+
             flatten_data = data.ravel()
 
             while numpy.mean(failure) < total_nb_chances:
@@ -504,18 +512,24 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 else:
                     b_array = None
 
-                t9 = time.time()
+                t7 = time.time()
+
                 if numerous_argmax:
+                    nb_numerous_argmax[0] += 1
                     if len(best_indices) == 0:
+                        nb_argmax = int(numpy.ceil(0.01*numpy.sum(flatten_data >= min_scalar_product)))
+                        #print(nb_argmax)
                         best_indices = largest_indices(flatten_data, nb_argmax)
+                        nb_mean_argmax += [nb_argmax]
 
                     best_template_index, peak_index = numpy.unravel_index(best_indices[0], data.shape)
                 else:
+                    nb_numerous_argmax[1] += 1
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
                     best_template_index, peak_index = numpy.unravel_index(data.argmax(), data.shape)
+                    nb_mean_argmax += [1]
 
-                if display_profiling:
-                    t_argmax += time.time() - t9
+                loop_max += time.time() - t7
 
                 peak_scalar_product = data[best_template_index, peak_index]
                 best_template2_index = best_template_index + n_tm
@@ -565,6 +579,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
                     t7 = time.time()
                     # Keep the matching.
+
+
+                    t7 = time.time()
                     peak_time_step = local_peaktimes[peak_index]
 
                     peak_data = (local_peaktimes - peak_time_step).astype(np.int32)
@@ -574,9 +591,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     indices = np.zeros((s_over, nb_neighbors), dtype=np.int32)
                     indices[idx_neighbor, np.arange(nb_neighbors)] = 1
 
-                    if display_profiling:
-                        t_indices += time.time() - t7
+                    loop_build += time.time() - t7
 
+                    t7 = time.time()
                     if full_gpu:
                         indices = cmt.CUDAMatrix(indices, copy_on_host=False)
                         if patch_gpu:
@@ -596,6 +613,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         if display_profiling:
                             t_sparse_product += time.time() - t8
 
+                    loop_dot_products += time.time() - t7
+
                     numerous_argmax = False
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
 
@@ -606,12 +625,15 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         result['spiketimes'] += [t_spike]
                         result['amplitudes'] += [(best_amp_n, best_amp2_n)]
                         result['templates'] += [best_template_index]
+
+                    t7 = time.time()
                     # Mark current matching as tried.
                     b[best_template_index, peak_index] = -numpy.inf
 
                     # Even better, we should ban this template from beeing used in nearby peaks
-                    #is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
-                    #b[best_template_index, is_neighbor] = -numpy.inf                    
+                    is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
+                    b[best_template_index, is_neighbor] = -numpy.inf
+                    loop_validation += time.time() - t7    
 
                     # Save debug data.
                     if debug:
@@ -625,6 +647,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         result_debug['template_nbs'] += [best_template_index]
                         result_debug['success_flags'] += [True]
                 else:
+
+                    t7 = time.time()
+
                     # Reject the matching.
                     numerous_argmax = True
 
@@ -639,6 +664,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         b[best_template_index, peak_index] = -numpy.inf
 
                     best_indices = best_indices[flatten_data[best_indices] > -numpy.inf]
+
+                    loop_rejection += time.time() - t7  
 
                     # Save debug data.
                     if debug:
@@ -655,7 +682,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 iteration_nb += 1
 
             if display_profiling:
-                t_looping += time.time() - t6
+                t_looping = time.time() - t6
+                print("Time looping", t_looping)
+                print('Max/Build/Dot/Valid/Rejection', loop_max, loop_build, loop_dot_products, loop_validation, loop_rejection, np.mean(nb_mean_argmax), nb_numerous_argmax)
 
             spikes_to_write = numpy.array(result['spiketimes'], dtype=numpy.uint32)
             amplitudes_to_write = numpy.array(result['amplitudes'], dtype=numpy.float32)
@@ -733,10 +762,6 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         print("Time loading", t_loading)
         print("Time whitening", t_whitening)
         print("Time peak detection", t_peaking)
-        print("Time extracting snippets", t_extracting)
-        print("Time scalar product", t_scalar)
-        print("Time looping [argmax/indices/dot products]", t_looping, t_argmax, t_indices, t_sparse_product)
-
     sys.stderr.flush()
 
     spiketimes_file.flush()
