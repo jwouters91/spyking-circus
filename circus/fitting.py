@@ -57,7 +57,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
     inv_nodes = numpy.zeros(n_total, dtype=numpy.int32)
     inv_nodes[nodes] = numpy.arange(len(nodes))
     data_file.open()
-    display_profiling = True
+    display_profiling = False
 
     #################################################################
 
@@ -487,9 +487,10 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
             iteration_nb = 0
             local_max = 0
-            numerous_argmax = False
+            numerous_argmax = True
 
             best_indices = numpy.zeros(0, dtype=numpy.int32)
+            nb_argmax = int(np.ceil(0.01*(n_tm * nb_local_peak_times)))
 
             t6 = time.time()
             loop_max = 0
@@ -501,6 +502,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             nb_numerous_argmax = [0, 0]
 
             data = b[:n_tm, :]
+            to_consider = numpy.arange(data.size)
+            idx_lookup_table = to_consider.reshape(n_tm, nb_local_peak_times)
 
             flatten_data = data.ravel()
 
@@ -514,11 +517,11 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
                 t7 = time.time()
 
+                #print(len(best_indices), nb_argmax)
+
                 if numerous_argmax:
                     nb_numerous_argmax[0] += 1
-                    if len(best_indices) == 0:
-                        nb_argmax = int(numpy.ceil(0.01*numpy.sum(flatten_data >= min_scalar_product)))
-                        #print(nb_argmax)
+                    if len(best_indices) <= 1:
                         best_indices = largest_indices(flatten_data, nb_argmax)
                         nb_mean_argmax += [nb_argmax]
 
@@ -528,6 +531,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
                     best_template_index, peak_index = numpy.unravel_index(data.argmax(), data.shape)
                     nb_mean_argmax += [1]
+
+                #print(len(best_indices), numerous_argmax)
+                
 
                 loop_max += time.time() - t7
 
@@ -578,8 +584,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                 if (a_min <= best_amp_n) & (best_amp_n <= a_max):
 
                     t7 = time.time()
-                    # Keep the matching.
 
+                    # Keep the matching.
+                    #old_scores = flatten_data.copy()
 
                     t7 = time.time()
                     peak_time_step = local_peaktimes[peak_index]
@@ -615,8 +622,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
                     loop_dot_products += time.time() - t7
 
-                    numerous_argmax = False
-                    best_indices = numpy.zeros(0, dtype=numpy.int32)
+                    #numerous_argmax = False
 
                     # Add matching to the result.
                     t_spike = all_spikes[peak_index]
@@ -630,10 +636,22 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     # Mark current matching as tried.
                     b[best_template_index, peak_index] = -numpy.inf
 
+                    # We check for templates that increased their scores
+                    modified = idx_lookup_table[:, is_neighbor].flatten()
+
+                    idx_new_max = np.argmax(flatten_data[modified])
+                    new_modified_max = flatten_data[modified[idx_new_max]]
+                    best_indices = best_indices[~np.in1d(best_indices, modified)]
+
+                    if len(best_indices) > 0:
+                        if new_modified_max > flatten_data[best_indices[0]]:
+                            best_indices = np.concatenate(([modified[idx_new_max]], best_indices))
+
+                    #print(len(best_indices))
                     # Even better, we should ban this template from beeing used in nearby peaks
-                    is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
-                    b[best_template_index, is_neighbor] = -numpy.inf
-                    loop_validation += time.time() - t7    
+                    #is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
+                    #b[best_template_index, is_neighbor] = -numpy.inf
+                    #loop_validation += time.time() - t7    
 
                     # Save debug data.
                     if debug:
