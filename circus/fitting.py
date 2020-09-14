@@ -57,7 +57,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
     inv_nodes = numpy.zeros(n_total, dtype=numpy.int32)
     inv_nodes[nodes] = numpy.arange(len(nodes))
     data_file.open()
-    display_profiling = False
+    display_profiling = True
 
     #################################################################
 
@@ -139,6 +139,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
     if use_gpu:
         templates = cmt.SparseCUDAMatrix(templates, copy_on_host=False)
+
+    templates = templates.toarray()
 
     info_string = ''
 
@@ -498,14 +500,12 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             loop_build = 0
             loop_validation = 0 
             loop_rejection = 0
-            nb_mean_argmax = []
-            nb_numerous_argmax = [0, 0]
 
             data = b[:n_tm, :]
             to_consider = numpy.arange(data.size)
-            idx_lookup_table = to_consider.reshape(n_tm, nb_local_peak_times)
-
             flatten_data = data.ravel()
+            idx_flatten = numpy.arange(flatten_data.size)
+            idx_lookup = idx_flatten.reshape(n_tm, nb_local_peak_times)
 
             while numpy.mean(failure) < total_nb_chances:
 
@@ -519,18 +519,16 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
 
                 #print(len(best_indices), nb_argmax)
 
+                best_indices = best_indices[flatten_data[best_indices] > -numpy.inf]
+
                 if numerous_argmax:
-                    nb_numerous_argmax[0] += 1
-                    if len(best_indices) <= 1:
+                    if len(best_indices) < 2:
                         best_indices = largest_indices(flatten_data, nb_argmax)
-                        nb_mean_argmax += [nb_argmax]
 
                     best_template_index, peak_index = numpy.unravel_index(best_indices[0], data.shape)
                 else:
-                    nb_numerous_argmax[1] += 1
                     best_indices = numpy.zeros(0, dtype=numpy.int32)
                     best_template_index, peak_index = numpy.unravel_index(data.argmax(), data.shape)
-                    nb_mean_argmax += [1]
 
                 #print(len(best_indices), numerous_argmax)
                 
@@ -616,9 +614,9 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         tmp1 = c_overs[best_template_index].multiply(-best_amp)
                         if numpy.abs(best_amp2_n) > min_second_component:
                             tmp1 += c_overs[best_template2_index].multiply(-best_amp2)
-                        b[:, is_neighbor] += tmp1.toarray().dot(indices)
-                        if display_profiling:
-                            t_sparse_product += time.time() - t8
+
+                        to_add = tmp1.toarray().dot(indices)
+                        b[:, is_neighbor] += to_add
 
                     loop_dot_products += time.time() - t7
 
@@ -636,22 +634,32 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     # Mark current matching as tried.
                     b[best_template_index, peak_index] = -numpy.inf
 
-                    # We check for templates that increased their scores
-                    modified = idx_lookup_table[:, is_neighbor].flatten()
+                    mask_modified = to_add[:n_tm, :] != 0
+                    mask_increased = to_add[:n_tm, :] > 0
 
-                    idx_new_max = np.argmax(flatten_data[modified])
-                    new_modified_max = flatten_data[modified[idx_new_max]]
-                    best_indices = best_indices[~np.in1d(best_indices, modified)]
+                    modified = idx_lookup[:, is_neighbor][mask_modified]
+                    increased = idx_lookup[:, is_neighbor][mask_increased]
 
-                    if len(best_indices) > 0:
-                        if new_modified_max > flatten_data[best_indices[0]]:
-                            best_indices = np.concatenate(([modified[idx_new_max]], best_indices))
+                    ## Solution 2. Slower but accurate
+                    best_indices = best_indices[1:]
+                    modified_best = best_indices[numpy.in1d(best_indices, modified)]
+                    nb_candidates = len(best_indices) - len(modified_best)
 
-                    #print(len(best_indices))
-                    # Even better, we should ban this template from beeing used in nearby peaks
-                    #is_neighbor = np.where(np.abs(peak_data) <= refractory)[0]                    
-                    #b[best_template_index, is_neighbor] = -numpy.inf
-                    #loop_validation += time.time() - t7    
+                    if len(modified_best) == 0 and len(increased) > 0:
+                        tmp = increased[numpy.argmax(flatten_data[increased])]
+                        modified_max = flatten_data[tmp]
+                        if modified_max > flatten_data[best_indices[0]]:
+                            best_indices = numpy.concatenate(([tmp], best_indices))
+                    elif nb_candidates < 2:
+                        # Old max candidates are modified, we need to resort everything
+                        best_indices = largest_indices(flatten_data, nb_argmax)
+                    else:
+                        # We still have one best max that is not modified, so higher than
+                        # the rest of the non modified matrix
+                        increased_elsewhere = increased[~numpy.in1d(increased, best_indices)]
+                        candidates = numpy.concatenate((best_indices, increased_elsewhere))
+                        best_indices = candidates[largest_indices(flatten_data[candidates], nb_candidates)]
+
 
                     # Save debug data.
                     if debug:
@@ -702,7 +710,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
             if display_profiling:
                 t_looping = time.time() - t6
                 print("Time looping", t_looping)
-                print('Max/Build/Dot/Valid/Rejection', loop_max, loop_build, loop_dot_products, loop_validation, loop_rejection, np.mean(nb_mean_argmax), nb_numerous_argmax)
+                print('Max/Build/Dot/Valid/Rejection', loop_max, loop_build, loop_dot_products, loop_validation, loop_rejection)
 
             spikes_to_write = numpy.array(result['spiketimes'], dtype=numpy.uint32)
             amplitudes_to_write = numpy.array(result['amplitudes'], dtype=numpy.float32)
@@ -780,6 +788,8 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
         print("Time loading", t_loading)
         print("Time whitening", t_whitening)
         print("Time peak detection", t_peaking)
+        print('Time extracting', t_extracting)
+        print("Time computing scalar products", t_scalar)
     sys.stderr.flush()
 
     spiketimes_file.flush()
