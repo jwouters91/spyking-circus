@@ -140,7 +140,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
     if use_gpu:
         templates = cmt.SparseCUDAMatrix(templates, copy_on_host=False)
 
-    templates = templates.toarray()
+    #templates = templates.toarray()
 
     info_string = ''
 
@@ -590,16 +590,16 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                     peak_time_step = local_peaktimes[peak_index]
 
                     peak_data = (local_peaktimes - peak_time_step).astype(np.int32)
-                    is_neighbor = np.where(np.abs(peak_data) <= temp_2_shift)[0]
+                    is_neighbor = np.abs(peak_data) <= temp_2_shift
                     idx_neighbor = peak_data[is_neighbor] + temp_2_shift
-                    nb_neighbors = len(is_neighbor)
-                    indices = np.zeros((s_over, nb_neighbors), dtype=np.int32)
-                    indices[idx_neighbor, np.arange(nb_neighbors)] = 1
-
+                    
                     loop_build += time.time() - t7
 
                     t7 = time.time()
                     if full_gpu:
+                        nb_neighbors = len(is_neighbor)
+                        indices = np.zeros((s_over, nb_neighbors), dtype=np.int32)
+                        indices[idx_neighbor, np.arange(nb_neighbors)] = 1
                         indices = cmt.CUDAMatrix(indices, copy_on_host=False)
                         if patch_gpu:
                             b_lines = b.get_col_slice(0, b.shape[0])
@@ -615,7 +615,7 @@ def main(params, nb_cpu, nb_gpu, use_gpu):
                         if numpy.abs(best_amp2_n) > min_second_component:
                             tmp1 += c_overs[best_template2_index].multiply(-best_amp2)
 
-                        to_add = tmp1.toarray().dot(indices)
+                        to_add = tmp1.toarray()[:, idx_neighbor]
                         b[:, is_neighbor] += to_add
 
                     loop_dot_products += time.time() - t7
